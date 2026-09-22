@@ -8,7 +8,11 @@ from pydantic import ValidationError
 
 from hushmark_api.main import app, main
 from hushmark_api.overlap import resolve_overlaps
-from hushmark_api.recognizers import DetectionCandidate, detect_structured_pii
+from hushmark_api.recognizers import (
+    DetectionCandidate,
+    detect_openai_person_pii,
+    detect_structured_pii,
+)
 from hushmark_api.schemas import (
     MAX_TEXT_LENGTH,
     AnalyzeRequestV1,
@@ -77,7 +81,12 @@ class HushMarkTests(unittest.TestCase):
 
     def test_analysis_ids_and_detection_ids_have_stable_shapes(self) -> None:
         text = "jane@example.com and jane@example.com"
-        response = analyze_document(text, "en-IN", lambda _text, _locale: [])
+        response = analyze_document(
+            text,
+            "en-IN",
+            lambda _text, _locale: [],
+            lambda _text, _locale: [],
+        )
 
         self.assertTrue(response.analysis_id.startswith("ana_"))
         self.assertEqual([item.id for item in response.detections], ["det_1", "det_2"])
@@ -85,7 +94,9 @@ class HushMarkTests(unittest.TestCase):
 
     def test_contextual_person_and_address_detection(self) -> None:
         text = "Aarav Sharma lives at 42 Lake View Road, Bengaluru."
-        response = analyze_document(text, "en-IN")
+        response = analyze_document(
+            text, "en-IN", person_detector=lambda _text, _locale: []
+        )
         detected = {
             (item.entity_type, text[item.start : item.end])
             for item in response.detections
@@ -93,6 +104,30 @@ class HushMarkTests(unittest.TestCase):
 
         self.assertIn((EntityType.PERSON, "Aarav Sharma"), detected)
         self.assertIn((EntityType.ADDRESS, "42 Lake View Road"), detected)
+
+    @patch("hushmark_api.recognizers._openai_client")
+    def test_openai_person_detection_uses_exact_local_offsets(
+        self, openai_client: MagicMock
+    ) -> None:
+        text = "Aarav Sen called Aarav Sen."
+        openai_client.return_value.responses.parse.return_value.output_parsed.names = [
+            "Aarav Sen",
+            "not present",
+        ]
+
+        detections = detect_openai_person_pii(text, "en-IN")
+
+        self.assertEqual(
+            [(item.start, item.end, item.source) for item in detections],
+            [
+                (0, 9, DetectionSource.OPENAI),
+                (17, 26, DetectionSource.OPENAI),
+            ],
+        )
+        request = openai_client.return_value.responses.parse.call_args.kwargs
+        self.assertEqual(request["model"], "gpt-5.4-nano")
+        self.assertEqual(request["input"][1]["content"], text)
+        self.assertFalse(request["store"])
 
     def test_request_rejects_empty_oversized_and_extra_fields(self) -> None:
         invalid_requests = (
@@ -120,10 +155,13 @@ class HushMarkTests(unittest.TestCase):
         transcript = "Email sample@example.com."
         transcriber.return_value = transcript
 
-        response = client.post(
-            "/v1/analyze/audio",
-            files={"file": ("recording.wav", b"synthetic audio", "audio/wav")},
-        )
+        with patch(
+            "hushmark_api.service.detect_openai_person_pii", return_value=[]
+        ):
+            response = client.post(
+                "/v1/analyze/audio",
+                files={"file": ("recording.wav", b"synthetic audio", "audio/wav")},
+            )
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -133,6 +171,21 @@ class HushMarkTests(unittest.TestCase):
         _, forwarded_name, forwarded_type = transcriber.call_args.args
         self.assertEqual(forwarded_name, "audio.wav")
         self.assertEqual(forwarded_type, "audio/wav")
+
+    @patch(
+        "hushmark_api.service.detect_openai_person_pii",
+        side_effect=OpenAIError("provider detail"),
+    )
+    def test_text_analysis_returns_safe_contextual_errors(
+        self, _person_detector: MagicMock
+    ) -> None:
+        response = client.post(
+            "/v1/analyze", json={"text": "Synthetic text.", "locale": "en-IN"}
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "analysis_unavailable")
+        self.assertNotIn("provider detail", response.text)
 
     @patch("hushmark_api.transcription._client")
     def test_transcriber_uses_model_and_language_hints(

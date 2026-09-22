@@ -14,6 +14,7 @@ from hushmark_api.schemas import (
     ErrorResponseV1,
 )
 from hushmark_api.service import (
+    ContextualAnalysisUnavailableError,
     NoSpeechDetectedError,
     TranscriptTooLargeError,
     analyze_audio_document,
@@ -59,10 +60,17 @@ async def request_validation_error(
 @app.post(
     "/v1/analyze",
     response_model=AnalyzeResponseV1,
-    responses={422: {"model": ErrorResponseV1}},
+    responses={422: {"model": ErrorResponseV1}, 503: {"model": ErrorResponseV1}},
 )
-def analyze_text(request: AnalyzeRequestV1) -> AnalyzeResponseV1:
-    return analyze_document(request.text, request.locale)
+def analyze_text(request: AnalyzeRequestV1) -> AnalyzeResponseV1 | JSONResponse:
+    try:
+        return analyze_document(request.text, request.locale)
+    except ContextualAnalysisUnavailableError:
+        return _error(
+            503,
+            "analysis_unavailable",
+            "Contextual analysis is temporarily unavailable.",
+        )
 
 
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
@@ -106,6 +114,12 @@ def analyze_audio(
             422,
             "transcript_too_large",
             f"Transcript must contain at most {MAX_TEXT_LENGTH} characters.",
+        )
+    except ContextualAnalysisUnavailableError:
+        return _error(
+            503,
+            "analysis_unavailable",
+            "Contextual analysis is temporarily unavailable.",
         )
     except OpenAIError:
         return _error(

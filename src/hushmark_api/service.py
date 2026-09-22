@@ -2,10 +2,13 @@ from collections.abc import Callable
 from typing import BinaryIO
 from uuid import uuid4
 
+from openai import OpenAIError
+
 from hushmark_api.overlap import resolve_overlaps
 from hushmark_api.recognizers import (
     DetectionCandidate,
     detect_contextual_pii,
+    detect_openai_person_pii,
     detect_structured_pii,
 )
 from hushmark_api.schemas import (
@@ -16,6 +19,7 @@ from hushmark_api.schemas import (
 )
 
 ContextDetector = Callable[[str, str], list[DetectionCandidate]]
+PersonDetector = Callable[[str, str], list[DetectionCandidate]]
 AudioTranscriber = Callable[[BinaryIO, str, str], str]
 
 
@@ -27,13 +31,22 @@ class TranscriptTooLargeError(Exception):
     pass
 
 
+class ContextualAnalysisUnavailableError(Exception):
+    pass
+
+
 def analyze_document(
     text: str,
     locale: str,
     contextual_detector: ContextDetector = detect_contextual_pii,
+    person_detector: PersonDetector | None = None,
 ) -> AnalyzeResponseV1:
     candidates = detect_structured_pii(text)
     candidates.extend(contextual_detector(text, locale))
+    try:
+        candidates.extend((person_detector or detect_openai_person_pii)(text, locale))
+    except OpenAIError as error:
+        raise ContextualAnalysisUnavailableError from error
     detections = [
         DetectionV1(
             id=f"det_{index}",

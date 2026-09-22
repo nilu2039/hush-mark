@@ -8,7 +8,9 @@ Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-uv run hushmark-api
+cp .env.example .env
+# Add your OpenAI API key to .env, then start with:
+uv run --env-file .env hushmark-api
 ```
 
 The API is available at `http://127.0.0.1:8000`, with interactive documentation at `/docs`.
@@ -37,24 +39,16 @@ The response contains zero-based, end-exclusive spans. It intentionally excludes
       "start": 8,
       "end": 16,
       "confidence": 0.85,
-      "source": "presidio",
+      "source": "openai",
       "status": "pending"
     }
   ]
 }
 ```
 
-Email, Indian phone, PAN, Aadhaar, payment-card, and IP detections use deterministic patterns and checksum validation where applicable. Indian phone numbers may use digits or individually spoken English digit words. Person and address candidates use Presidio and require human review.
+Email, Indian phone, PAN, Aadhaar, payment-card, and IP detections use deterministic patterns and checksum validation where applicable. Indian phone numbers may use digits or individually spoken English digit words. Person-name candidates use OpenAI's `gpt-5.4-nano`; address candidates use Presidio. Every candidate requires human review.
 
 ## Analyze audio
-
-Create a local environment file from the committed template:
-
-```bash
-cp .env.example .env
-# Add your key to .env, then start with:
-uv run --env-file .env hushmark-api
-```
 
 `POST /v1/analyze/audio` accepts one completed audio recording as multipart form data. Files must be no larger than 25 MB and use `flac`, `m4a`, `mp3`, `mp4`, `mpeg`, `mpga`, `ogg`, `wav`, or `webm` format.
 
@@ -84,7 +78,7 @@ The service uses OpenAI's `gpt-transcribe` model with English and Hindi language
 }
 ```
 
-Raw audio is sent to OpenAI for transcription. HushMark does not intentionally persist the upload or transcript, and it does not log request bodies, filenames, transcripts, detected values, or placeholder mappings.
+Raw audio is sent to OpenAI for transcription, and submitted text or transcripts are sent to OpenAI for person-name detection. Responses API storage is disabled with `store=false`. HushMark does not intentionally persist uploads or text, and it does not log request bodies, filenames, transcripts, detected values, or placeholder mappings.
 
 ## Test
 

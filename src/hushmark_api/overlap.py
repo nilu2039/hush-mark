@@ -4,6 +4,7 @@ from hushmark_api.schemas import DetectionSource, EntityType
 _SOURCE_PRIORITY = {
     DetectionSource.REGEX: 2,
     DetectionSource.PRESIDIO: 1,
+    DetectionSource.OPENAI: 1,
     DetectionSource.MANUAL: 3,
 }
 _TYPE_PRIORITY = {

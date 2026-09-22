@@ -22,6 +22,7 @@ class EntityType(StrEnum):
 class DetectionSource(StrEnum):
     REGEX = "regex"
     PRESIDIO = "presidio"
+    OPENAI = "openai"
     MANUAL = "manual"
 
 
