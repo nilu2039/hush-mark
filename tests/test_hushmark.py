@@ -1,6 +1,9 @@
 import unittest
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
+from fastapi.testclient import TestClient
+from openai import OpenAIError
 from pydantic import ValidationError
 
 from hushmark_api.main import app, main
@@ -13,6 +16,9 @@ from hushmark_api.schemas import (
     EntityType,
 )
 from hushmark_api.service import analyze_document
+from hushmark_api.transcription import transcribe_audio
+
+client = TestClient(app)
 
 
 class HushMarkTests(unittest.TestCase):
@@ -42,6 +48,22 @@ class HushMarkTests(unittest.TestCase):
 
         self.assertNotIn(EntityType.AADHAAR, types)
         self.assertNotIn(EntityType.PAYMENT_CARD, types)
+
+    def test_spoken_indian_phone_returns_original_word_offsets(self) -> None:
+        spoken_phone = (
+            "plus nine one six zero zero zero zero zero zero zero zero zero"
+        )
+        text = f"Call {spoken_phone} for a synthetic example."
+
+        detections = detect_structured_pii(text)
+        phone = next(item for item in detections if item.entity_type == EntityType.PHONE)
+
+        self.assertEqual(text[phone.start : phone.end], spoken_phone)
+        self.assertFalse(
+            detect_structured_pii(
+                "Too short: six zero zero zero zero zero zero zero zero."
+            )
+        )
 
     def test_structured_detection_wins_an_overlap(self) -> None:
         contextual = DetectionCandidate(
@@ -84,11 +106,111 @@ class HushMarkTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     AnalyzeRequestV1.model_validate(request)
 
-    def test_openapi_exposes_only_the_versioned_analysis_route(self) -> None:
+    def test_openapi_exposes_versioned_analysis_routes(self) -> None:
         schema = app.openapi()
 
         self.assertIn("/v1/analyze", schema["paths"])
+        self.assertIn("/v1/analyze/audio", schema["paths"])
         self.assertNotIn("/anonymize", schema["paths"])
+
+    @patch("hushmark_api.main.transcribe_audio")
+    def test_audio_upload_returns_transcript_and_detections(
+        self, transcriber: MagicMock
+    ) -> None:
+        transcript = "Email sample@example.com."
+        transcriber.return_value = transcript
+
+        response = client.post(
+            "/v1/analyze/audio",
+            files={"file": ("recording.wav", b"synthetic audio", "audio/wav")},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["transcript"], transcript)
+        email = next(item for item in body["detections"] if item["type"] == "EMAIL")
+        self.assertEqual(transcript[email["start"] : email["end"]], "sample@example.com")
+        _, forwarded_name, forwarded_type = transcriber.call_args.args
+        self.assertEqual(forwarded_name, "audio.wav")
+        self.assertEqual(forwarded_type, "audio/wav")
+
+    @patch("hushmark_api.transcription._client")
+    def test_transcriber_uses_model_and_language_hints(
+        self, openai_client: MagicMock
+    ) -> None:
+        sdk = openai_client.return_value
+        sdk.audio.transcriptions.create.return_value.text = "Synthetic transcript."
+        audio = BytesIO(b"synthetic audio")
+
+        transcript = transcribe_audio(audio, "audio.wav", "audio/wav")
+
+        self.assertEqual(transcript, "Synthetic transcript.")
+        sdk.audio.transcriptions.create.assert_called_once_with(
+            model="gpt-transcribe",
+            file=("audio.wav", audio, "audio/wav"),
+            languages=["en", "hi"],
+        )
+
+    @patch("hushmark_api.main.transcribe_audio")
+    def test_audio_upload_rejects_invalid_inputs(self, transcriber: MagicMock) -> None:
+        missing = client.post("/v1/analyze/audio")
+        self.assertEqual(missing.status_code, 422)
+        self.assertEqual(missing.json()["code"], "invalid_audio")
+
+        cases = (
+            (("recording.txt", b"audio", "text/plain"), 415, "unsupported_audio_type"),
+            (("recording.wav", b"", "audio/wav"), 422, "invalid_audio"),
+        )
+        for uploaded_file, status, code in cases:
+            with self.subTest(code=code):
+                response = client.post(
+                    "/v1/analyze/audio", files={"file": uploaded_file}
+                )
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json()["code"], code)
+
+        transcriber.assert_not_called()
+
+    @patch("hushmark_api.main.MAX_AUDIO_SIZE_BYTES", 3)
+    @patch("hushmark_api.main.transcribe_audio")
+    def test_audio_upload_rejects_oversized_files(
+        self, transcriber: MagicMock
+    ) -> None:
+        response = client.post(
+            "/v1/analyze/audio",
+            files={"file": ("recording.wav", b"four", "audio/wav")},
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()["code"], "audio_too_large")
+        transcriber.assert_not_called()
+
+    @patch("hushmark_api.main.transcribe_audio")
+    def test_audio_upload_returns_safe_transcription_errors(
+        self, transcriber: MagicMock
+    ) -> None:
+        cases = (
+            ("   ", 422, "no_speech_detected"),
+            ("x" * (MAX_TEXT_LENGTH + 1), 422, "transcript_too_large"),
+            (OpenAIError("provider detail"), 503, "transcription_unavailable"),
+        )
+        for result, status, code in cases:
+            with self.subTest(code=code):
+                if isinstance(result, Exception):
+                    transcriber.side_effect = result
+                    transcriber.return_value = None
+                else:
+                    transcriber.side_effect = None
+                    transcriber.return_value = result
+
+                response = client.post(
+                    "/v1/analyze/audio",
+                    files={"file": ("recording.wav", b"audio", "audio/wav")},
+                )
+
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json()["code"], code)
+                self.assertNotIn("provider detail", response.text)
 
     @patch("uvicorn.run")
     def test_cli_runs_the_api(self, run: MagicMock) -> None:

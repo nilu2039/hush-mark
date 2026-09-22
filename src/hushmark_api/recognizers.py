@@ -23,6 +23,13 @@ _EMAIL = re.compile(
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}"
 )
 _PHONE = re.compile(r"(?<!\d)(?:(?:\+91|0)[ -]?)?[6-9](?:[ -]?\d){9}(?!\d)")
+_DIGIT_WORD = r"(?:zero|one|two|three|four|five|six|seven|eight|nine)"
+_SPOKEN_PHONE = re.compile(
+    rf"(?<!\w)(?:(?:plus[ -]+)?nine[ -]+one[ -]+)?"
+    rf"(?:six|seven|eight|nine)(?:[ -]+{_DIGIT_WORD}){{9}}"
+    rf"(?![ -]+{_DIGIT_WORD})(?!\w)",
+    re.I,
+)
 _PAN = re.compile(r"(?<![A-Z0-9])[A-Z]{5}\d{4}[A-Z](?![A-Z0-9])", re.I)
 _AADHAAR = re.compile(r"(?<!\d)[2-9]\d{3}(?:[ -]?\d{4}){2}(?!\d)")
 _PAYMENT_CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
@@ -118,6 +125,9 @@ def detect_structured_pii(text: str) -> list[DetectionCandidate]:
     candidates: list[DetectionCandidate] = []
     candidates.extend(_regex_candidates(text, _EMAIL, EntityType.EMAIL, 0.99))
     candidates.extend(_regex_candidates(text, _PHONE, EntityType.PHONE, 0.95))
+    candidates.extend(
+        _regex_candidates(text, _SPOKEN_PHONE, EntityType.PHONE, 0.95)
+    )
     candidates.extend(_regex_candidates(text, _PAN, EntityType.PAN, 0.95))
     candidates.extend(
         _regex_candidates(text, _AADHAAR, EntityType.AADHAAR, 1.0, _valid_aadhaar)

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_TEXT_LENGTH = 50_000
 
+
 class EntityType(StrEnum):
     PERSON = "PERSON"
     EMAIL = "EMAIL"
@@ -62,6 +63,10 @@ class AnalyzeResponseV1(BaseModel):
     analysis_id: str = Field(alias="analysisId")
     text_length: int = Field(alias="textLength", ge=1)
     detections: list[DetectionV1]
+
+
+class AnalyzeAudioResponseV1(AnalyzeResponseV1):
+    transcript: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
 
 
 class ErrorResponseV1(BaseModel):
