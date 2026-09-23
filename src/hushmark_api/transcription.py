@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import BinaryIO
 
@@ -9,15 +10,37 @@ SUPPORTED_AUDIO_EXTENSIONS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class TimedWord:
+    text: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True, slots=True)
+class TimedTranscript:
+    text: str
+    words: tuple[TimedWord, ...]
+
+
 @lru_cache(maxsize=1)
 def _client() -> OpenAI:
     return OpenAI()
 
 
-def transcribe_audio(audio: BinaryIO, filename: str, content_type: str) -> str:
+def transcribe_audio(
+    audio: BinaryIO, filename: str, content_type: str
+) -> TimedTranscript:
     transcription = _client().audio.transcriptions.create(
-        model="gpt-transcribe",
+        model="whisper-1",
         file=(filename, audio, content_type),
-        languages=["en", "hi"],
+        response_format="verbose_json",
+        timestamp_granularities=["word"],
     )
-    return transcription.text
+    return TimedTranscript(
+        text=transcription.text,
+        words=tuple(
+            TimedWord(word.word, word.start, word.end)
+            for word in transcription.words or ()
+        ),
+    )

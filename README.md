@@ -4,7 +4,7 @@ Privacy-focused FastAPI service for detecting personally identifiable informatio
 
 ## Run locally
 
-Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.14, [uv](https://docs.astral.sh/uv/), and FFmpeg (`ffmpeg` and `ffprobe` on `PATH`) for audio export.
 
 ```bash
 uv sync
@@ -57,7 +57,7 @@ curl http://127.0.0.1:8000/v1/analyze/audio \
   --form file=@recording.webm
 ```
 
-The service uses OpenAI's `gpt-transcribe` model with English and Hindi language hints, then analyzes the returned transcript. Detection offsets refer to the `transcript` field.
+The service uses OpenAI's `whisper-1` model with word timestamps, then analyzes the returned transcript. Detection `start` and `end` refer to characters in `transcript`; `audioStartMs` and `audioEndMs` refer to zero-based, end-exclusive milliseconds in the original recording. Audio analysis fails if word timings cannot be aligned to the transcript.
 
 ```json
 {
@@ -72,13 +72,30 @@ The service uses OpenAI's `gpt-transcribe` model with English and Hindi language
       "end": 24,
       "confidence": 0.99,
       "source": "regex",
-      "status": "pending"
+      "status": "pending",
+      "audioStartMs": 400,
+      "audioEndMs": 1200
     }
   ]
 }
 ```
 
-Raw audio is sent to OpenAI for transcription, and submitted text or transcripts are sent to OpenAI for person-name detection. Responses API storage is disabled with `store=false`. HushMark does not intentionally persist uploads or text, and it does not log request bodies, filenames, transcripts, detected values, or placeholder mappings.
+## Beep approved audio detections
+
+After the reviewer approves or rejects every detection, the frontend keeps the original recording and sends it again to `POST /v1/redact/audio`. The multipart `review` field is JSON containing the `analysisId` and the complete, ordered detection list. Each detection includes its returned `id`, `audioStartMs`, and `audioEndMs`, plus a final `status` of `approved` or `rejected`.
+
+```bash
+curl http://127.0.0.1:8000/v1/redact/audio \
+  --form file=@recording.webm \
+  --form 'review={"analysisId":"ana_00000000000000000000000000000000","detections":[{"id":"det_1","status":"approved","audioStartMs":400,"audioEndMs":1200}]}' \
+  --output redacted.mp3
+```
+
+The response is an MP3. Approved intervals are widened by 100 ms on each side, merged if they touch, and have their original sound fully replaced by a beep. Rejected intervals are left audible. All rejected detections produce an MP3 transcode without beeps. The API rejects pending, malformed, duplicate, or out-of-duration review intervals. Because the service stores no analysis state, the frontend must submit the full original detection list; the API cannot verify that omitted detections or edited times match a past analysis. Human review and listening to the export remain necessary.
+
+Validation errors retain the `{ "code": "invalid_review", "message": "..." }` shape. Messages name the field or decision to fix without returning submitted values.
+
+Raw audio is sent to OpenAI for transcription, and submitted text or transcripts are sent to OpenAI for person-name detection. Responses API storage is disabled with `store=false`. HushMark does not intentionally persist uploads or text; audio export uses temporary files that are deleted after the response. The service does not log request bodies, filenames, transcripts, detected values, or placeholder mappings.
 
 ## Test
 

@@ -1,4 +1,11 @@
+import json
+import math
+import shutil
+import struct
+import subprocess
 import unittest
+import wave
+from array import array
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -16,11 +23,19 @@ from hushmark_api.recognizers import (
 from hushmark_api.schemas import (
     MAX_TEXT_LENGTH,
     AnalyzeRequestV1,
+    AnalyzeResponseV1,
+    DetectionV1,
     DetectionSource,
     EntityType,
+    RedactAudioReviewV1,
 )
-from hushmark_api.service import analyze_document
-from hushmark_api.transcription import transcribe_audio
+from hushmark_api.redaction import _approved_intervals
+from hushmark_api.service import (
+    TimingUnavailableError,
+    analyze_audio_document,
+    analyze_document,
+)
+from hushmark_api.transcription import TimedTranscript, TimedWord, transcribe_audio
 
 client = TestClient(app)
 
@@ -146,14 +161,29 @@ class HushMarkTests(unittest.TestCase):
 
         self.assertIn("/v1/analyze", schema["paths"])
         self.assertIn("/v1/analyze/audio", schema["paths"])
+        self.assertIn("/v1/redact/audio", schema["paths"])
         self.assertNotIn("/anonymize", schema["paths"])
+        self.assertEqual(
+            list(
+                schema["paths"]["/v1/redact/audio"]["post"]["responses"]["200"][
+                    "content"
+                ]
+            ),
+            ["audio/mpeg"],
+        )
 
     @patch("hushmark_api.main.transcribe_audio")
     def test_audio_upload_returns_transcript_and_detections(
         self, transcriber: MagicMock
     ) -> None:
         transcript = "Email sample@example.com."
-        transcriber.return_value = transcript
+        transcriber.return_value = TimedTranscript(
+            transcript,
+            (
+                TimedWord("Email", 0.0, 0.3),
+                TimedWord("sample@example.com.", 0.4, 1.2),
+            ),
+        )
 
         with patch(
             "hushmark_api.service.detect_openai_person_pii", return_value=[]
@@ -168,6 +198,7 @@ class HushMarkTests(unittest.TestCase):
         self.assertEqual(body["transcript"], transcript)
         email = next(item for item in body["detections"] if item["type"] == "EMAIL")
         self.assertEqual(transcript[email["start"] : email["end"]], "sample@example.com")
+        self.assertEqual((email["audioStartMs"], email["audioEndMs"]), (400, 1200))
         _, forwarded_name, forwarded_type = transcriber.call_args.args
         self.assertEqual(forwarded_name, "audio.wav")
         self.assertEqual(forwarded_type, "audio/wav")
@@ -188,20 +219,26 @@ class HushMarkTests(unittest.TestCase):
         self.assertNotIn("provider detail", response.text)
 
     @patch("hushmark_api.transcription._client")
-    def test_transcriber_uses_model_and_language_hints(
+    def test_transcriber_returns_timestamped_words(
         self, openai_client: MagicMock
     ) -> None:
         sdk = openai_client.return_value
         sdk.audio.transcriptions.create.return_value.text = "Synthetic transcript."
+        sdk.audio.transcriptions.create.return_value.words = [
+            MagicMock(word="Synthetic", start=0.1, end=0.5),
+            MagicMock(word="transcript.", start=0.6, end=1.0),
+        ]
         audio = BytesIO(b"synthetic audio")
 
         transcript = transcribe_audio(audio, "audio.wav", "audio/wav")
 
-        self.assertEqual(transcript, "Synthetic transcript.")
+        self.assertEqual(transcript.text, "Synthetic transcript.")
+        self.assertEqual(transcript.words[1], TimedWord("transcript.", 0.6, 1.0))
         sdk.audio.transcriptions.create.assert_called_once_with(
-            model="gpt-transcribe",
+            model="whisper-1",
             file=("audio.wav", audio, "audio/wav"),
-            languages=["en", "hi"],
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
         )
 
     @patch("hushmark_api.main.transcribe_audio")
@@ -243,8 +280,12 @@ class HushMarkTests(unittest.TestCase):
         self, transcriber: MagicMock
     ) -> None:
         cases = (
-            ("   ", 422, "no_speech_detected"),
-            ("x" * (MAX_TEXT_LENGTH + 1), 422, "transcript_too_large"),
+            (TimedTranscript("   ", ()), 422, "no_speech_detected"),
+            (
+                TimedTranscript("x" * (MAX_TEXT_LENGTH + 1), ()),
+                422,
+                "transcript_too_large",
+            ),
             (OpenAIError("provider detail"), 503, "transcription_unavailable"),
         )
         for result, status, code in cases:
@@ -264,6 +305,245 @@ class HushMarkTests(unittest.TestCase):
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json()["code"], code)
                 self.assertNotIn("provider detail", response.text)
+
+    def test_audio_alignment_rejects_mismatched_words(self) -> None:
+        with patch("hushmark_api.service.analyze_document") as analyze:
+            analyze.return_value.detections = []
+            analyze.return_value.analysis_id = "ana_" + "0" * 32
+            analyze.return_value.text_length = 19
+            with self.assertRaises(TimingUnavailableError):
+                analyze_audio_document(
+                    BytesIO(b"synthetic audio"),
+                    "audio.wav",
+                    "audio/wav",
+                    lambda *_: TimedTranscript(
+                        "Email a@example.com", (TimedWord("different", 0, 1),)
+                    ),
+                )
+
+    @patch("hushmark_api.service.analyze_document")
+    def test_audio_alignment_covers_multiword_and_punctuation(
+        self, analyze: MagicMock
+    ) -> None:
+        transcript = "Aarav Sen: sample@example.com!"
+        analyze.return_value = AnalyzeResponseV1(
+            analysisId="ana_" + "0" * 32,
+            textLength=len(transcript),
+            detections=[
+                DetectionV1(
+                    id="det_1",
+                    type="PERSON",
+                    start=0,
+                    end=9,
+                    confidence=0.85,
+                    source="openai",
+                ),
+                DetectionV1(
+                    id="det_2",
+                    type="EMAIL",
+                    start=11,
+                    end=29,
+                    confidence=0.99,
+                    source="regex",
+                ),
+            ],
+        )
+        transcription = TimedTranscript(
+            transcript,
+            (
+                TimedWord("Aarav", 0.1, 0.4),
+                TimedWord("Sen:", 0.39, 0.7),
+                TimedWord("sample@example.com!", 0.8, 1.5),
+            ),
+        )
+
+        response = analyze_audio_document(
+            BytesIO(b"synthetic audio"),
+            "audio.wav",
+            "audio/wav",
+            lambda *_: transcription,
+        )
+
+        self.assertEqual(
+            [(item.audio_start_ms, item.audio_end_ms) for item in response.detections],
+            [(100, 700), (800, 1500)],
+        )
+
+    @staticmethod
+    def _synthetic_wav() -> bytes:
+        output = BytesIO()
+        with wave.open(output, "wb") as recording:
+            recording.setnchannels(1)
+            recording.setsampwidth(2)
+            recording.setframerate(8000)
+            recording.writeframes(
+                b"".join(
+                    struct.pack(
+                        "<h",
+                        round(10000 * math.sin(2 * math.pi * 440 * sample / 8000)),
+                    )
+                    for sample in range(16000)
+                )
+            )
+        return output.getvalue()
+
+    @staticmethod
+    def _review(status: str = "approved", start: int = 500, end: int = 1000) -> str:
+        return json.dumps(
+            {
+                "analysisId": "ana_" + "0" * 32,
+                "detections": [
+                    {
+                        "id": "det_1",
+                        "status": status,
+                        "audioStartMs": start,
+                        "audioEndMs": end,
+                    }
+                ],
+            }
+        )
+
+    def test_approved_intervals_merge_after_padding(self) -> None:
+        review = RedactAudioReviewV1.model_validate(
+            {
+                "analysisId": "ana_" + "0" * 32,
+                "detections": [
+                    {
+                        "id": "det_1", "status": "approved",
+                        "audioStartMs": 0, "audioEndMs": 100,
+                    },
+                    {
+                        "id": "det_2", "status": "approved",
+                        "audioStartMs": 250, "audioEndMs": 400,
+                    },
+                    {
+                        "id": "det_3", "status": "rejected",
+                        "audioStartMs": 500, "audioEndMs": 600,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(_approved_intervals(review, 0.7), [(0, 0.5)])
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required"
+    )
+    def test_audio_redaction_replaces_original_speech_with_beep(self) -> None:
+        response = client.post(
+            "/v1/redact/audio",
+            data={"review": self._review()},
+            files={"file": ("recording.wav", self._synthetic_wav(), "audio/wav")},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertEqual(response.headers["content-type"], "audio/mpeg")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        decoded = subprocess.run(
+            [
+                "ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "f32le",
+                "-ac", "1", "-ar", "8000", "pipe:1",
+            ],
+            input=response.content,
+            capture_output=True,
+            check=True,
+        )
+        samples = array("f")
+        samples.frombytes(decoded.stdout)
+
+        def strength(start: float, end: float, frequency: int) -> float:
+            chunk = samples[round(start * 8000) : round(end * 8000)]
+            real = sum(
+                value * math.cos(2 * math.pi * frequency * index / 8000)
+                for index, value in enumerate(chunk)
+            )
+            imaginary = sum(
+                value * math.sin(2 * math.pi * frequency * index / 8000)
+                for index, value in enumerate(chunk)
+            )
+            return math.hypot(real, imaginary) / len(chunk)
+
+        self.assertGreater(strength(0.1, 0.3, 440), 0.05)
+        self.assertLess(strength(0.6, 0.9, 440), 0.005)
+        self.assertGreater(strength(0.6, 0.9, 1000), 0.05)
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required"
+    )
+    def test_rejected_detection_keeps_original_audio(self) -> None:
+        response = client.post(
+            "/v1/redact/audio",
+            data={"review": self._review(status="rejected")},
+            files={"file": ("recording.wav", self._synthetic_wav(), "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content.startswith(b"ID3"))
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required"
+    )
+    def test_redaction_accepts_separate_beep_intervals(self) -> None:
+        review = json.loads(self._review(start=300, end=500))
+        review["detections"].append(
+            {
+                "id": "det_2",
+                "status": "approved",
+                "audioStartMs": 1300,
+                "audioEndMs": 1500,
+            }
+        )
+        response = client.post(
+            "/v1/redact/audio",
+            data={"review": json.dumps(review)},
+            files={"file": ("recording.wav", self._synthetic_wav(), "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 200, response.text[:200])
+
+    def test_redaction_rejects_pending_invalid_and_out_of_duration_review(self) -> None:
+        duplicate_review = json.loads(self._review())
+        duplicate_review["detections"].append(duplicate_review["detections"][0])
+        extra_and_pending = json.loads(self._review(status="pending"))
+        extra_and_pending["detections"][0]["type"] = "test_private_marker"
+        cases = (
+            (self._review(status="pending"), ("Set every detection status",)),
+            (self._review(start=1000, end=500), ("0 <= audioStartMs < audioEndMs",)),
+            (self._review(start=500, end=3000), ("recording's duration",)),
+            (json.dumps(duplicate_review), ("without gaps or duplicates",)),
+            (
+                json.dumps(extra_and_pending),
+                ("Set every detection status", "Remove extra review fields"),
+            ),
+            (json.dumps(self._review()), ("without quotes around the entire object",)),
+            ("not json", ("valid JSON",)),
+        )
+        for review, expected_messages in cases:
+            with self.subTest(expected_messages=expected_messages):
+                response = client.post(
+                    "/v1/redact/audio",
+                    data={"review": review},
+                    files={"file": ("recording.wav", self._synthetic_wav(), "audio/wav")},
+                )
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["code"], "invalid_review")
+                for expected_message in expected_messages:
+                    self.assertIn(expected_message, response.json()["message"])
+                self.assertNotIn("test_private_marker", response.text)
+
+        missing_review = client.post(
+            "/v1/redact/audio",
+            files={"file": ("recording.wav", self._synthetic_wav(), "audio/wav")},
+        )
+        self.assertEqual(missing_review.status_code, 422)
+        self.assertEqual(missing_review.json()["code"], "invalid_review")
+        self.assertIn("Add a review form field", missing_review.json()["message"])
+
+    def test_redaction_rejects_corrupt_audio(self) -> None:
+        response = client.post(
+            "/v1/redact/audio",
+            data={"review": self._review()},
+            files={"file": ("recording.wav", b"not audio", "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["code"], "invalid_audio")
 
     @patch("uvicorn.run")
     def test_cli_runs_the_api(self, run: MagicMock) -> None:
