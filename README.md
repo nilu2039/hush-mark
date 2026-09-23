@@ -1,6 +1,6 @@
 # HushMark API
 
-Privacy-focused FastAPI service for detecting personally identifiable information in text and completed audio recordings. Automatic detection can miss or misclassify entities, so every result is returned as a reviewable span rather than being silently anonymized.
+Privacy-focused FastAPI service for detecting personally identifiable information in text files, submitted text, and completed audio recordings. Automatic detection can miss or misclassify entities, so every result is returned as a reviewable span rather than being silently anonymized.
 
 ## Run locally
 
@@ -46,7 +46,27 @@ The response contains zero-based, end-exclusive spans. It intentionally excludes
 }
 ```
 
-Email, Indian phone, PAN, Aadhaar, payment-card, and IP detections use deterministic patterns and checksum validation where applicable. Indian phone numbers may use digits or individually spoken English digit words. Person-name candidates use OpenAI's `gpt-5.4-nano`; address candidates use Presidio. Every candidate requires human review.
+Email, Indian phone, PAN, Aadhaar, payment-card, and IP detections use deterministic patterns and checksum validation where applicable. Indian phone numbers may use digits or individually spoken English digit words. Person-name candidates use OpenAI's `gpt-5.4-nano`; address candidates use Presidio. When a location follows a numbered street on the same line, the address span also covers the street and an adjacent six-digit PIN. Every candidate requires human review.
+
+## Analyze and redact text files
+
+`POST /v1/analyze/document` accepts one UTF-8 `.txt`, `.md`, or `.markdown` file as multipart form data, up to 256 KiB. A leading UTF-8 BOM is removed from the returned `text`; all other characters, including CRLF line endings and Markdown syntax, are preserved. The decoded text must contain non-whitespace content and be no longer than 50,000 characters. Detection offsets are zero-based and end-exclusive in the returned `text`.
+
+```bash
+curl http://127.0.0.1:8000/v1/analyze/document \
+  --form file=@notes.md
+```
+
+The response contains `text`, `analysisId`, `textLength`, and the same reviewable `detections` as `/v1/analyze`. It does not contain a redacted preview. After approving or rejecting every detection, submit the original file and a JSON `review` form field to `POST /v1/redact/document`. Each review detection contains its returned `id`, `type`, `start`, and `end`, plus a final `status` of `approved` or `rejected`.
+
+```bash
+curl http://127.0.0.1:8000/v1/redact/document \
+  --form file=@notes.md \
+  --form 'review={"analysisId":"ana_00000000000000000000000000000000","detections":[{"id":"det_1","type":"EMAIL","start":6,"end":24,"status":"approved"}]}' \
+  --output redacted.md
+```
+
+The download keeps the input extension and UTF-8 BOM, if present. Only approved spans are replaced with typed placeholders such as `[EMAIL]`; rejected spans and all surrounding text are unchanged. A placeholder inside Markdown syntax may change how that Markdown renders. The API rejects pending decisions and invalid or overlapping spans. The service stores no analysis state, so the client must keep the original file and full ordered detection list; the API cannot verify that a submitted review matches an earlier analysis. Review the downloaded file before sharing it.
 
 ## Analyze audio
 
@@ -95,7 +115,7 @@ The response is an MP3. Approved intervals are widened by 100 ms on each side, m
 
 Validation errors retain the `{ "code": "invalid_review", "message": "..." }` shape. Messages name the field or decision to fix without returning submitted values.
 
-Raw audio is sent to OpenAI for transcription, and submitted text or transcripts are sent to OpenAI for person-name detection. Responses API storage is disabled with `store=false`. HushMark does not intentionally persist uploads or text; audio export uses temporary files that are deleted after the response. The service does not log request bodies, filenames, transcripts, detected values, or placeholder mappings.
+Raw audio is sent to OpenAI for transcription, and submitted text, decoded text files, or transcripts are sent to OpenAI for person-name detection. Responses API storage is disabled with `store=false`. HushMark does not intentionally persist uploads or text; audio export uses temporary files that are deleted after the response. The service does not log request bodies, filenames, transcripts, detected values, or placeholder mappings.
 
 ## Test
 

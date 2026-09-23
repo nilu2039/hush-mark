@@ -118,7 +118,7 @@ class HushMarkTests(unittest.TestCase):
         }
 
         self.assertIn((EntityType.PERSON, "Aarav Sharma"), detected)
-        self.assertIn((EntityType.ADDRESS, "42 Lake View Road"), detected)
+        self.assertIn((EntityType.ADDRESS, "42 Lake View Road, Bengaluru"), detected)
 
     @patch("hushmark_api.recognizers._openai_client")
     def test_openai_person_detection_uses_exact_local_offsets(

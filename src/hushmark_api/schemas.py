@@ -76,6 +76,42 @@ class AnalyzeAudioResponseV1(AnalyzeResponseV1):
     detections: list[AudioDetectionV1]
 
 
+class AnalyzeDocumentResponseV1(AnalyzeResponseV1):
+    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+
+
+class ReviewedDocumentDetectionV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    id: str = Field(pattern=r"^det_[1-9]\d*$")
+    entity_type: EntityType = Field(alias="type")
+    start: int = Field(strict=True, ge=0)
+    end: int = Field(strict=True, gt=0)
+    status: Literal[ReviewStatus.APPROVED, ReviewStatus.REJECTED]
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> "ReviewedDocumentDetectionV1":
+        if self.end <= self.start:
+            raise ValueError("text interval must have positive length")
+        return self
+
+
+class RedactDocumentReviewV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    analysis_id: str = Field(alias="analysisId", pattern=r"^ana_[0-9a-f]{32}$")
+    detections: list[ReviewedDocumentDetectionV1]
+
+    @model_validator(mode="after")
+    def ordered_nonoverlapping_detections(self) -> "RedactDocumentReviewV1":
+        previous_end = 0
+        for index, detection in enumerate(self.detections, start=1):
+            if detection.id != f"det_{index}" or detection.start < previous_end:
+                raise ValueError("detection IDs and spans must be ordered")
+            previous_end = detection.end
+        return self
+
+
 class ReviewedAudioDetectionV1(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 

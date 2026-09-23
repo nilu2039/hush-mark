@@ -4,11 +4,20 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from openai import OpenAIError
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
 
+from hushmark_api.documents import (
+    DocumentTextTooLargeError,
+    DocumentTooLargeError,
+    InvalidTextFileError,
+    InvalidTextReviewError,
+    SUPPORTED_TEXT_EXTENSIONS,
+    decode_text_document,
+    render_redacted_document,
+)
 from hushmark_api.redaction import (
     AudioProcessingUnavailableError,
     InvalidAudioError,
@@ -19,10 +28,12 @@ from hushmark_api.redaction import (
 from hushmark_api.schemas import (
     MAX_TEXT_LENGTH,
     AnalyzeAudioResponseV1,
+    AnalyzeDocumentResponseV1,
     AnalyzeRequestV1,
     AnalyzeResponseV1,
     ErrorResponseV1,
     RedactAudioReviewV1,
+    RedactDocumentReviewV1,
 )
 from hushmark_api.service import (
     ContextualAnalysisUnavailableError,
@@ -31,6 +42,7 @@ from hushmark_api.service import (
     TranscriptTooLargeError,
     analyze_audio_document,
     analyze_document,
+    analyze_text_document,
 )
 from hushmark_api.transcription import (
     MAX_AUDIO_SIZE_BYTES,
@@ -43,7 +55,7 @@ app = FastAPI(title="HushMark API", version="0.1.0")
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_error(
-    _request: Request, exception: RequestValidationError
+    request: Request, exception: RequestValidationError
 ) -> JSONResponse:
     errors = exception.errors()
     if any(error["type"] == "string_too_long" for error in errors):
@@ -57,10 +69,16 @@ async def request_validation_error(
             "message": "Text must be a non-empty string.",
         }
     elif any(error["loc"][-1:] == ("file",) for error in errors):
-        content = {
-            "code": "invalid_audio",
-            "message": "A non-empty audio file is required.",
-        }
+        if request.url.path.endswith("/document"):
+            content = {
+                "code": "invalid_text_file",
+                "message": "A non-empty text file is required.",
+            }
+        else:
+            content = {
+                "code": "invalid_audio",
+                "message": "A non-empty audio file is required.",
+            }
     elif any(error["loc"][-1:] == ("review",) for error in errors):
         content = {
             "code": "invalid_review",
@@ -93,6 +111,99 @@ def analyze_text(request: AnalyzeRequestV1) -> AnalyzeResponseV1 | JSONResponse:
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code, content={"code": code, "message": message}
+    )
+
+
+def _document_error(
+    error: DocumentTooLargeError | InvalidTextFileError | DocumentTextTooLargeError,
+) -> JSONResponse:
+    if isinstance(error, DocumentTooLargeError):
+        return _error(413, "text_file_too_large", "Text files must be at most 256 KiB.")
+    if isinstance(error, DocumentTextTooLargeError):
+        return _error(
+            422,
+            "text_too_large",
+            f"Text must contain at most {MAX_TEXT_LENGTH} characters.",
+        )
+    return _error(422, "invalid_text_file", "A non-empty UTF-8 text file is required.")
+
+
+@app.post(
+    "/v1/analyze/document",
+    response_model=AnalyzeDocumentResponseV1,
+    responses={
+        413: {"model": ErrorResponseV1},
+        415: {"model": ErrorResponseV1},
+        422: {"model": ErrorResponseV1},
+        503: {"model": ErrorResponseV1},
+    },
+)
+def analyze_document_file(
+    file: Annotated[UploadFile, File(description="UTF-8 text document")],
+) -> AnalyzeDocumentResponseV1 | JSONResponse:
+    suffix = Path(file.filename or "").suffix.lower().removeprefix(".")
+    if suffix not in SUPPORTED_TEXT_EXTENSIONS:
+        return _error(415, "unsupported_text_type", "Text format is not supported.")
+    try:
+        return analyze_text_document(file.file)
+    except (DocumentTooLargeError, InvalidTextFileError, DocumentTextTooLargeError) as error:
+        return _document_error(error)
+    except ContextualAnalysisUnavailableError:
+        return _error(
+            503,
+            "analysis_unavailable",
+            "Contextual analysis is temporarily unavailable.",
+        )
+
+
+@app.post(
+    "/v1/redact/document",
+    response_model=None,
+    response_class=Response,
+    responses={
+        200: {"content": {"text/plain": {}, "text/markdown": {}}},
+        413: {"model": ErrorResponseV1},
+        415: {"model": ErrorResponseV1},
+        422: {"model": ErrorResponseV1},
+    },
+)
+def redact_document_file(
+    file: Annotated[UploadFile, File(description="Original UTF-8 text document")],
+    review: Annotated[str, Form(description="JSON document review")],
+) -> Response | JSONResponse:
+    extension = Path(file.filename or "").suffix.removeprefix(".")
+    suffix = extension.lower()
+    if suffix not in SUPPORTED_TEXT_EXTENSIONS:
+        return _error(415, "unsupported_text_type", "Text format is not supported.")
+    try:
+        text, has_bom = decode_text_document(file.file)
+    except (DocumentTooLargeError, InvalidTextFileError, DocumentTextTooLargeError) as error:
+        return _document_error(error)
+    try:
+        parsed_review = RedactDocumentReviewV1.model_validate(json.loads(review))
+    except (ValueError, ValidationError):
+        return _error(
+            422,
+            "invalid_review",
+            "Review must contain analysisId and ordered, non-overlapping detections "
+            "with valid types, ranges, and approved or rejected statuses.",
+        )
+    try:
+        output = render_redacted_document(text, parsed_review, has_bom)
+    except InvalidTextReviewError:
+        return _error(
+            422,
+            "invalid_review",
+            "Every detection span must fit within the uploaded text.",
+        )
+    media_type = "text/plain" if suffix == "txt" else "text/markdown"
+    return Response(
+        output,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="redacted.{extension}"',
+        },
     )
 
 

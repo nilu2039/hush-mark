@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from openai import OpenAIError
 
+from hushmark_api.documents import decode_text_document
 from hushmark_api.overlap import resolve_overlaps
 from hushmark_api.recognizers import (
     DetectionCandidate,
@@ -16,6 +17,7 @@ from hushmark_api.recognizers import (
 from hushmark_api.schemas import (
     MAX_TEXT_LENGTH,
     AnalyzeAudioResponseV1,
+    AnalyzeDocumentResponseV1,
     AnalyzeResponseV1,
     AudioDetectionV1,
     DetectionV1,
@@ -70,6 +72,17 @@ def analyze_document(
         analysis_id=f"ana_{uuid4().hex}",
         text_length=len(text),
         detections=detections,
+    )
+
+
+def analyze_text_document(source: BinaryIO) -> AnalyzeDocumentResponseV1:
+    text, _has_bom = decode_text_document(source)
+    analysis = analyze_document(text, "en-IN")
+    return AnalyzeDocumentResponseV1(
+        text=text,
+        analysis_id=analysis.analysis_id,
+        text_length=analysis.text_length,
+        detections=analysis.detections,
     )
 
 

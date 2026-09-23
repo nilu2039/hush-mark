@@ -46,6 +46,13 @@ _IPV6 = re.compile(
     r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}"
     r"(?![0-9A-Fa-f:])"
 )
+_STREET_BEFORE_LOCATION = re.compile(
+    r"(?<!\w)\d{1,5}(?:[ \t]+[A-Za-z][A-Za-z.'-]*){1,5}"
+    r"[ \t]+(?:Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Marg|Nagar|Colony|"
+    r"Boulevard|Blvd)\.?[ \t]*,[ \t]*$",
+    re.I,
+)
+_PIN_AFTER_LOCATION = re.compile(r"[ \t]+[1-9]\d{5}(?!\d)")
 _PERSON_PROMPT = """Extract every specific natural person's name from the text.
 The text may be English, Hindi, or Hinglish and may contain unfamiliar Indian names.
 Return each name as the longest exact substring written in the text, without titles or
@@ -208,24 +215,40 @@ def _context_analyzer() -> AnalyzerEngine:
     return AnalyzerEngine()
 
 
+def _address_span(text: str, start: int, end: int) -> tuple[int, int]:
+    line_start = text.rfind("\n", 0, start) + 1
+    street = _STREET_BEFORE_LOCATION.search(text[line_start:start])
+    if street:
+        start = line_start + street.start()
+    pin = _PIN_AFTER_LOCATION.match(text, end)
+    if pin:
+        end = pin.end()
+    return start, end
+
+
 def detect_contextual_pii(text: str, locale: str) -> list[DetectionCandidate]:
     language = {"en-IN": "en"}[locale]
     entity_map = {
         "PERSON": EntityType.PERSON,
         "LOCATION": EntityType.ADDRESS,
     }
-    return [
-        DetectionCandidate(
-            entity_type=entity_map[result.entity_type],
-            start=result.start,
-            end=result.end,
-            confidence=result.score,
-            source=DetectionSource.PRESIDIO,
+    candidates: list[DetectionCandidate] = []
+    for result in _context_analyzer().analyze(
+        text=text,
+        language=language,
+        entities=list(entity_map),
+        score_threshold=0.5,
+    ):
+        start, end = result.start, result.end
+        if result.entity_type == "LOCATION":
+            start, end = _address_span(text, start, end)
+        candidates.append(
+            DetectionCandidate(
+                entity_type=entity_map[result.entity_type],
+                start=start,
+                end=end,
+                confidence=result.score,
+                source=DetectionSource.PRESIDIO,
+            )
         )
-        for result in _context_analyzer().analyze(
-            text=text,
-            language=language,
-            entities=list(entity_map),
-            score_threshold=0.5,
-        )
-    ]
+    return candidates
