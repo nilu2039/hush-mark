@@ -91,13 +91,17 @@ curl http://127.0.0.1:8000/v1/analyze/audio \
   --form file=@recording.webm
 ```
 
-The service uses OpenAI's `whisper-1` model with word timestamps, then analyzes the returned transcript. Detection `start` and `end` refer to characters in `transcript`; `audioStartMs` and `audioEndMs` refer to zero-based, end-exclusive milliseconds in the original recording. Audio analysis fails if word timings cannot be aligned to the transcript.
+The service uses OpenAI's `whisper-1` model with word timestamps, then analyzes the returned transcript. Detection `start` and `end` refer to characters in `transcript`; `audioStartMs` and `audioEndMs` refer to zero-based, end-exclusive milliseconds in the original recording. `wordTimings` maps transcript character spans to recording times so clients can select spoken words. Its spans cover alphanumeric characters within each word; punctuation between them is included. Audio analysis fails if word timings cannot be aligned to the transcript.
 
 ```json
 {
   "transcript": "Email sample@example.com.",
   "analysisId": "ana_...",
   "textLength": 25,
+  "wordTimings": [
+    { "start": 0, "end": 5, "audioStartMs": 0, "audioEndMs": 300 },
+    { "start": 6, "end": 24, "audioStartMs": 400, "audioEndMs": 1200 }
+  ],
   "detections": [
     {
       "id": "det_1",

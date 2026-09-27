@@ -1,5 +1,6 @@
 from bisect import bisect_left
 from collections.abc import Callable
+from itertools import groupby
 from math import ceil, floor, isfinite
 from typing import BinaryIO
 from uuid import uuid4
@@ -21,6 +22,7 @@ from hushmark_api.schemas import (
     AnalyzeResponseV1,
     AudioDetectionV1,
     DetectionV1,
+    WordTimingV1,
 )
 from hushmark_api.transcription import TimedTranscript
 
@@ -103,6 +105,18 @@ def analyze_audio_document(
     timings = _word_timings(transcription)
     offsets = [offset for offset, _ in timings]
     word_indexes = [word_index for _, word_index in timings]
+    word_timings: list[WordTimingV1] = []
+    for word_index, group in groupby(timings, key=lambda item: item[1]):
+        characters = [offset for offset, _ in group]
+        word = transcription.words[word_index]
+        word_timings.append(
+            WordTimingV1(
+                start=characters[0],
+                end=characters[-1] + 1,
+                audioStartMs=floor(word.start * 1000),
+                audioEndMs=ceil(word.end * 1000),
+            )
+        )
     detections: list[AudioDetectionV1] = []
     for detection in analysis.detections:
         first_index = bisect_left(offsets, detection.start)
@@ -120,6 +134,7 @@ def analyze_audio_document(
         )
     return AnalyzeAudioResponseV1(
         transcript=transcript,
+        word_timings=word_timings,
         analysis_id=analysis.analysis_id,
         text_length=analysis.text_length,
         detections=detections,

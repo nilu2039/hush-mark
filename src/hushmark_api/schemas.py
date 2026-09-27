@@ -79,8 +79,18 @@ class AudioDetectionV1(DetectionV1):
     audio_end_ms: int = Field(alias="audioEndMs", gt=0)
 
 
+class WordTimingV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    audio_start_ms: int = Field(alias="audioStartMs", ge=0)
+    audio_end_ms: int = Field(alias="audioEndMs", gt=0)
+
+
 class AnalyzeAudioResponseV1(AnalyzeResponseV1):
     transcript: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+    word_timings: list[WordTimingV1] = Field(alias="wordTimings")
     detections: list[AudioDetectionV1]
 
 

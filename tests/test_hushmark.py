@@ -196,6 +196,10 @@ class HushMarkTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["transcript"], transcript)
+        self.assertEqual(body["wordTimings"], [
+            {"start": 0, "end": 5, "audioStartMs": 0, "audioEndMs": 300},
+            {"start": 6, "end": 24, "audioStartMs": 400, "audioEndMs": 1200},
+        ])
         email = next(item for item in body["detections"] if item["type"] == "EMAIL")
         self.assertEqual(transcript[email["start"] : email["end"]], "sample@example.com")
         self.assertEqual((email["audioStartMs"], email["audioEndMs"]), (400, 1200))
@@ -367,6 +371,35 @@ class HushMarkTests(unittest.TestCase):
         self.assertEqual(
             [(item.audio_start_ms, item.audio_end_ms) for item in response.detections],
             [(100, 700), (800, 1500)],
+        )
+        self.assertEqual(
+            [(item.start, item.end, item.audio_start_ms, item.audio_end_ms)
+             for item in response.word_timings],
+            [(0, 5, 100, 400), (6, 9, 390, 700), (11, 29, 800, 1500)],
+        )
+
+    @patch("hushmark_api.service.analyze_document")
+    def test_audio_word_spans_use_unicode_character_offsets(
+        self, analyze: MagicMock
+    ) -> None:
+        transcript = "👋 Aarav Sen!"
+        analyze.return_value = AnalyzeResponseV1(
+            analysisId="ana_" + "0" * 32,
+            textLength=len(transcript),
+            detections=[],
+        )
+        response = analyze_audio_document(
+            BytesIO(b"synthetic audio"),
+            "audio.wav",
+            "audio/wav",
+            lambda *_: TimedTranscript(
+                transcript,
+                (TimedWord("Aarav", 0.1, 0.4), TimedWord("Sen!", 0.5, 0.8)),
+            ),
+        )
+        self.assertEqual(
+            [(item.start, item.end) for item in response.word_timings],
+            [(2, 7), (8, 11)],
         )
 
     @staticmethod

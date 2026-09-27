@@ -148,9 +148,9 @@ Do not set the `Content-Type` header yourself for `FormData`; the browser suppli
 
 ## Audio flow
 
-Analyze the original recording with multipart `file`. The response includes a `transcript`, `textLength`, and detections with both transcript character offsets (`start`, `end`) and recording times (`audioStartMs`, `audioEndMs`). Show the transcript for context and use the recording times to position marks in an audio player or waveform.
+Analyze the original recording with multipart `file`. The response includes a `transcript`, `textLength`, `wordTimings`, and detections with both transcript character offsets (`start`, `end`) and recording times (`audioStartMs`, `audioEndMs`). Each `wordTimings` entry has a zero-based, end-exclusive transcript span (`start`, `end`) in Unicode code points and the corresponding `audioStartMs` and `audioEndMs`. A selected transcript range maps to the first and last word spans it intersects; a selection with no spoken word has no audio interval. Show the transcript for context and use the recording times to position marks in an audio player or waveform.
 
-For a new manual mark, let the reviewer select a time interval while listening. Convert to integer milliseconds (for example, `Math.round(seconds * 1000)`) and send `audioStartMs < audioEndMs`. Its `type` is required. A type is optional for an automatic audio mark, so older clients that omit it still work. Do not send transcript `start` or `end` in the audio export review.
+For a new manual mark, let the reviewer select transcript words or a time interval while listening. Convert manually entered times to integer milliseconds (for example, `Math.round(seconds * 1000)`) and send `audioStartMs < audioEndMs`. Its `type` is required. A type is optional for an automatic audio mark, so older clients that omit it still work. Do not send transcript `start` or `end` in the audio export review.
 
 ```json
 {
