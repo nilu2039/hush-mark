@@ -2,6 +2,7 @@ from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 MAX_TEXT_LENGTH = 50_000
 
@@ -30,6 +31,13 @@ class ReviewStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+def _valid_review_ids(ids: list[str]) -> bool:
+    automatic = {identifier for identifier in ids if identifier.startswith("det_")}
+    return len(ids) == len(set(ids)) and automatic == {
+        f"det_{index}" for index in range(1, len(automatic) + 1)
+    }
 
 
 class AnalyzeRequestV1(BaseModel):
@@ -83,7 +91,7 @@ class AnalyzeDocumentResponseV1(AnalyzeResponseV1):
 class ReviewedDocumentDetectionV1(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    id: str = Field(pattern=r"^det_[1-9]\d*$")
+    id: str = Field(pattern=r"^(?:det|man)_[1-9]\d*$")
     entity_type: EntityType = Field(alias="type")
     start: int = Field(strict=True, ge=0)
     end: int = Field(strict=True, gt=0)
@@ -103,19 +111,44 @@ class RedactDocumentReviewV1(BaseModel):
     detections: list[ReviewedDocumentDetectionV1]
 
     @model_validator(mode="after")
-    def ordered_nonoverlapping_detections(self) -> "RedactDocumentReviewV1":
+    def valid_detections(self) -> "RedactDocumentReviewV1":
+        if not _valid_review_ids([detection.id for detection in self.detections]):
+            raise ValueError("detection IDs must be unique and automatic IDs complete")
         previous_end = 0
-        for index, detection in enumerate(self.detections, start=1):
-            if detection.id != f"det_{index}" or detection.start < previous_end:
-                raise ValueError("detection IDs and spans must be ordered")
+        approved = sorted(
+            (
+                detection
+                for detection in self.detections
+                if detection.status == ReviewStatus.APPROVED
+            ),
+            key=lambda detection: detection.start,
+        )
+        for detection in approved:
+            if detection.start < previous_end:
+                raise ValueError("approved detection spans must not overlap")
             previous_end = detection.end
         return self
+
+
+class RedactTextRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH, strict=True)
+    review: RedactDocumentReviewV1
+
+    @field_validator("text")
+    @classmethod
+    def text_must_have_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must contain non-whitespace characters")
+        return value
 
 
 class ReviewedAudioDetectionV1(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    id: str = Field(pattern=r"^det_[1-9]\d*$")
+    id: str = Field(pattern=r"^(?:det|man)_[1-9]\d*$")
+    entity_type: EntityType | None = Field(default=None, alias="type")
     status: Literal[ReviewStatus.APPROVED, ReviewStatus.REJECTED]
     audio_start_ms: int = Field(alias="audioStartMs", strict=True, ge=0)
     audio_end_ms: int = Field(alias="audioEndMs", strict=True, gt=0)
@@ -124,6 +157,10 @@ class ReviewedAudioDetectionV1(BaseModel):
     def valid_interval(self) -> "ReviewedAudioDetectionV1":
         if self.audio_end_ms <= self.audio_start_ms:
             raise ValueError("audio interval must have positive duration")
+        if self.id.startswith("man_") and self.entity_type is None:
+            raise PydanticCustomError(
+                "manual_type_required", "manual detection type is required"
+            )
         return self
 
 
@@ -134,12 +171,9 @@ class RedactAudioReviewV1(BaseModel):
     detections: list[ReviewedAudioDetectionV1]
 
     @model_validator(mode="after")
-    def sequential_detection_ids(self) -> "RedactAudioReviewV1":
-        if any(
-            detection.id != f"det_{index}"
-            for index, detection in enumerate(self.detections, start=1)
-        ):
-            raise ValueError("detection IDs must be complete and ordered")
+    def valid_detection_ids(self) -> "RedactAudioReviewV1":
+        if not _valid_review_ids([detection.id for detection in self.detections]):
+            raise ValueError("detection IDs must be unique and automatic IDs complete")
         return self
 
 

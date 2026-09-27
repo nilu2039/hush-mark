@@ -38,16 +38,29 @@ def decode_text_document(source: BinaryIO) -> tuple[str, bool]:
     return text, content.startswith(BOM_UTF8)
 
 
+def render_redacted_text(text: str, review: RedactDocumentReviewV1) -> str:
+    if any(detection.end > len(text) for detection in review.detections):
+        raise InvalidTextReviewError
+    approved = sorted(
+        (
+            detection
+            for detection in review.detections
+            if detection.status == ReviewStatus.APPROVED
+        ),
+        key=lambda detection: detection.start,
+        reverse=True,
+    )
+    for detection in approved:
+        text = (
+            text[: detection.start]
+            + f"[{detection.entity_type.value}]"
+            + text[detection.end :]
+        )
+    return text
+
+
 def render_redacted_document(
     text: str, review: RedactDocumentReviewV1, has_bom: bool
 ) -> bytes:
-    if any(detection.end > len(text) for detection in review.detections):
-        raise InvalidTextReviewError
-    for detection in reversed(review.detections):
-        if detection.status == ReviewStatus.APPROVED:
-            text = (
-                text[: detection.start]
-                + f"[{detection.entity_type.value}]"
-                + text[detection.end :]
-            )
-    return (BOM_UTF8 if has_bom else b"") + text.encode("utf-8")
+    output = render_redacted_text(text, review)
+    return (BOM_UTF8 if has_bom else b"") + output.encode("utf-8")

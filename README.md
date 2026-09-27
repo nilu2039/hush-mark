@@ -15,6 +15,8 @@ uv run --env-file .env hushmark-api
 
 The API is available at `http://127.0.0.1:8000`, with interactive documentation at `/docs`.
 
+For client implementation, see the [frontend integration guide](docs/frontend-integration.md).
+
 ## Analyze text
 
 `POST /v1/analyze` accepts non-empty plain text up to 50,000 characters. The MVP currently supports the `en-IN` locale.
@@ -48,6 +50,18 @@ The response contains zero-based, end-exclusive spans. It intentionally excludes
 
 Email, Indian phone, PAN, Aadhaar, payment-card, and IP detections use deterministic patterns and checksum validation where applicable. Indian phone numbers may use digits or individually spoken English digit words. Person-name candidates use OpenAI's `gpt-5.4-nano`; address candidates use Presidio. When a location follows a numbered street on the same line, the address span also covers the street and an adjacent six-digit PIN. Every candidate requires human review.
 
+## Review and redact pasted text
+
+Clients keep the original text and editable review marks locally. To export, send `POST /v1/redact` with JSON containing the original `text` and a `review` object with the returned `analysisId` and detections. Each detection has `id`, `type`, `start`, `end`, and a final `status` of `approved` or `rejected`. Reviewer-added marks use unique `man_N` IDs; automatic marks retain their `det_N` IDs. For example, a reviewer can redact a missed span even if automatic analysis returned no detections:
+
+```bash
+curl http://127.0.0.1:8000/v1/redact \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email sample@example.com.","review":{"analysisId":"ana_00000000000000000000000000000000","detections":[{"id":"man_1","type":"EMAIL","start":6,"end":24,"status":"approved"}]}}'
+```
+
+The response is UTF-8 `text/plain`, here `Email [EMAIL].`, with `Cache-Control: no-store`. Approved spans become typed placeholders; rejected spans stay unchanged. Reviewers may adjust an automatic mark's type or offsets while keeping its ID. Only approved spans must not overlap. The input text and its zero-based, end-exclusive offsets remain unchanged throughout review.
+
 ## Analyze and redact text files
 
 `POST /v1/analyze/document` accepts one UTF-8 `.txt`, `.md`, or `.markdown` file as multipart form data, up to 256 KiB. A leading UTF-8 BOM is removed from the returned `text`; all other characters, including CRLF line endings and Markdown syntax, are preserved. The decoded text must contain non-whitespace content and be no longer than 50,000 characters. Detection offsets are zero-based and end-exclusive in the returned `text`.
@@ -57,7 +71,7 @@ curl http://127.0.0.1:8000/v1/analyze/document \
   --form file=@notes.md
 ```
 
-The response contains `text`, `analysisId`, `textLength`, and the same reviewable `detections` as `/v1/analyze`. It does not contain a redacted preview. After approving or rejecting every detection, submit the original file and a JSON `review` form field to `POST /v1/redact/document`. Each review detection contains its returned `id`, `type`, `start`, and `end`, plus a final `status` of `approved` or `rejected`.
+The response contains `text`, `analysisId`, `textLength`, and the same reviewable `detections` as `/v1/analyze`. It does not contain a redacted preview. After approving or rejecting every detection, submit the original file and a JSON `review` form field to `POST /v1/redact/document`. Use the same editable detection format as pasted text. Automatic IDs must remain `det_1` through `det_N` without gaps; added marks use unique `man_N` IDs. Marks may be submitted in any order.
 
 ```bash
 curl http://127.0.0.1:8000/v1/redact/document \
@@ -66,7 +80,7 @@ curl http://127.0.0.1:8000/v1/redact/document \
   --output redacted.md
 ```
 
-The download keeps the input extension and UTF-8 BOM, if present. Only approved spans are replaced with typed placeholders such as `[EMAIL]`; rejected spans and all surrounding text are unchanged. A placeholder inside Markdown syntax may change how that Markdown renders. The API rejects pending decisions and invalid or overlapping spans. The service stores no analysis state, so the client must keep the original file and full ordered detection list; the API cannot verify that a submitted review matches an earlier analysis. Review the downloaded file before sharing it.
+The download keeps the input extension and UTF-8 BOM, if present. Only approved spans are replaced with typed placeholders such as `[EMAIL]`; rejected spans and all surrounding text are unchanged. A placeholder inside Markdown syntax may change how that Markdown renders. The API rejects pending decisions, invalid spans, and overlapping approved spans. The service stores no analysis state, so the client must keep the original file and review list; the API cannot verify that a submitted review matches an earlier analysis. Review the downloaded file before sharing it.
 
 ## Analyze audio
 
@@ -102,7 +116,7 @@ The service uses OpenAI's `whisper-1` model with word timestamps, then analyzes 
 
 ## Beep approved audio detections
 
-After the reviewer approves or rejects every detection, the frontend keeps the original recording and sends it again to `POST /v1/redact/audio`. The multipart `review` field is JSON containing the `analysisId` and the complete, ordered detection list. Each detection includes its returned `id`, `audioStartMs`, and `audioEndMs`, plus a final `status` of `approved` or `rejected`.
+After the reviewer approves or rejects every detection, the frontend keeps the original recording and sends it again to `POST /v1/redact/audio`. The multipart `review` field is JSON containing the `analysisId` and detection list. Reviewers may adjust automatic time ranges or add unique `man_N` marks selected while listening. Each detection has `id`, `audioStartMs`, `audioEndMs`, and a final `status` of `approved` or `rejected`. Manual marks also require a PII `type`; automatic marks accept a type but older reviews without one remain valid. Automatic IDs must remain `det_1` through `det_N` without gaps, and marks may be submitted in any order.
 
 ```bash
 curl http://127.0.0.1:8000/v1/redact/audio \
@@ -111,7 +125,7 @@ curl http://127.0.0.1:8000/v1/redact/audio \
   --output redacted.mp3
 ```
 
-The response is an MP3. Approved intervals are widened by 100 ms on each side, merged if they touch, and have their original sound fully replaced by a beep. Rejected intervals are left audible. All rejected detections produce an MP3 transcode without beeps. The API rejects pending, malformed, duplicate, or out-of-duration review intervals. Because the service stores no analysis state, the frontend must submit the full original detection list; the API cannot verify that omitted detections or edited times match a past analysis. Human review and listening to the export remain necessary.
+The response is an MP3. Approved intervals are widened by 100 ms on each side, merged if they touch, and have their original sound fully replaced by a beep. Rejected intervals are left audible. All rejected detections produce an MP3 transcode without beeps. The API rejects pending, malformed, duplicate, or out-of-duration review intervals. Because the service stores no analysis state, the frontend must submit the original detection list and any manual marks; the API cannot verify that omitted detections or edited times match a past analysis. Human review and listening to the export remain necessary.
 
 Validation errors retain the `{ "code": "invalid_review", "message": "..." }` shape. Messages name the field or decision to fix without returning submitted values.
 

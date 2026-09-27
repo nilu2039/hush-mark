@@ -425,6 +425,29 @@ class HushMarkTests(unittest.TestCase):
         )
         self.assertEqual(_approved_intervals(review, 0.7), [(0, 0.5)])
 
+    def test_audio_review_accepts_typed_manual_and_legacy_automatic_marks(self) -> None:
+        review = RedactAudioReviewV1.model_validate(
+            {
+                "analysisId": "ana_" + "0" * 32,
+                "detections": [
+                    {
+                        "id": "man_1", "type": "EMAIL", "status": "approved",
+                        "audioStartMs": 500, "audioEndMs": 1000,
+                    },
+                    {
+                        "id": "det_2", "type": "PERSON", "status": "rejected",
+                        "audioStartMs": 300, "audioEndMs": 600,
+                    },
+                    {
+                        "id": "det_1", "status": "rejected",
+                        "audioStartMs": 0, "audioEndMs": 100,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(_approved_intervals(review, 2.0), [(0.4, 1.1)])
+        self.assertIsNone(review.detections[2].entity_type)
+
     @unittest.skipUnless(
         shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required"
     )
@@ -481,6 +504,29 @@ class HushMarkTests(unittest.TestCase):
     @unittest.skipUnless(
         shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required"
     )
+    def test_manual_audio_mark_exports_beep(self) -> None:
+        review = {
+            "analysisId": "ana_" + "0" * 32,
+            "detections": [
+                {
+                    "id": "man_1", "type": "EMAIL", "status": "approved",
+                    "audioStartMs": 500, "audioEndMs": 1000,
+                }
+            ],
+        }
+        response = client.post(
+            "/v1/redact/audio",
+            data={"review": json.dumps(review)},
+            files={"file": ("recording.wav", self._synthetic_wav(), "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertEqual(response.headers["content-type"], "audio/mpeg")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertTrue(response.content.startswith(b"ID3"))
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required"
+    )
     def test_redaction_accepts_separate_beep_intervals(self) -> None:
         review = json.loads(self._review(start=300, end=500))
         review["detections"].append(
@@ -502,12 +548,21 @@ class HushMarkTests(unittest.TestCase):
         duplicate_review = json.loads(self._review())
         duplicate_review["detections"].append(duplicate_review["detections"][0])
         extra_and_pending = json.loads(self._review(status="pending"))
-        extra_and_pending["detections"][0]["type"] = "test_private_marker"
+        extra_and_pending["detections"][0]["extra"] = "test_private_marker"
+        manual_missing_type = json.loads(self._review())
+        manual_missing_type["detections"][0]["id"] = "man_1"
+        manual_invalid_type = json.loads(self._review())
+        manual_invalid_type["detections"][0].update(id="man_1", type="test_private_marker")
+        manual_out_of_duration = json.loads(self._review(start=500, end=3000))
+        manual_out_of_duration["detections"][0].update(id="man_1", type="EMAIL")
         cases = (
             (self._review(status="pending"), ("Set every detection status",)),
             (self._review(start=1000, end=500), ("0 <= audioStartMs < audioEndMs",)),
             (self._review(start=500, end=3000), ("recording's duration",)),
-            (json.dumps(duplicate_review), ("without gaps or duplicates",)),
+            (json.dumps(manual_out_of_duration), ("recording's duration",)),
+            (json.dumps(duplicate_review), ("no gaps or duplicates",)),
+            (json.dumps(manual_missing_type), ("valid PII type",)),
+            (json.dumps(manual_invalid_type), ("valid PII type",)),
             (
                 json.dumps(extra_and_pending),
                 ("Set every detection status", "Remove extra review fields"),

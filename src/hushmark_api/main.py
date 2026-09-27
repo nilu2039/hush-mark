@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from openai import OpenAIError
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
@@ -17,6 +17,7 @@ from hushmark_api.documents import (
     SUPPORTED_TEXT_EXTENSIONS,
     decode_text_document,
     render_redacted_document,
+    render_redacted_text,
 )
 from hushmark_api.redaction import (
     AudioProcessingUnavailableError,
@@ -34,6 +35,7 @@ from hushmark_api.schemas import (
     ErrorResponseV1,
     RedactAudioReviewV1,
     RedactDocumentReviewV1,
+    RedactTextRequestV1,
 )
 from hushmark_api.service import (
     ContextualAnalysisUnavailableError,
@@ -79,10 +81,14 @@ async def request_validation_error(
                 "code": "invalid_audio",
                 "message": "A non-empty audio file is required.",
             }
-    elif any(error["loc"][-1:] == ("review",) for error in errors):
+    elif any("review" in error["loc"] for error in errors):
         content = {
             "code": "invalid_review",
-            "message": "Add a review form field with JSON containing analysisId and detections.",
+            "message": (
+                "Review must contain analysisId and valid detections."
+                if request.url.path == "/v1/redact"
+                else "Add a review form field with JSON containing analysisId and detections."
+            ),
         }
     else:
         content = {
@@ -106,6 +112,24 @@ def analyze_text(request: AnalyzeRequestV1) -> AnalyzeResponseV1 | JSONResponse:
             "analysis_unavailable",
             "Contextual analysis is temporarily unavailable.",
         )
+
+
+@app.post(
+    "/v1/redact",
+    response_model=None,
+    response_class=PlainTextResponse,
+    responses={422: {"model": ErrorResponseV1}},
+)
+def redact_text(request: RedactTextRequestV1) -> PlainTextResponse | JSONResponse:
+    try:
+        output = render_redacted_text(request.text, request.review)
+    except InvalidTextReviewError:
+        return _error(
+            422,
+            "invalid_review",
+            "Every detection span must fit within the submitted text.",
+        )
+    return PlainTextResponse(output, headers={"Cache-Control": "no-store"})
 
 
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
@@ -185,8 +209,9 @@ def redact_document_file(
         return _error(
             422,
             "invalid_review",
-            "Review must contain analysisId and ordered, non-overlapping detections "
-            "with valid types, ranges, and approved or rejected statuses.",
+            "Review must contain analysisId and unique detection IDs with valid "
+            "types, ranges, and approved or rejected statuses; approved spans "
+            "cannot overlap.",
         )
     try:
         output = render_redacted_document(text, parsed_review, has_bom)
@@ -213,8 +238,12 @@ def _review_validation_message(error: ValidationError) -> str:
         location = problem["loc"]
         if problem["type"] == "extra_forbidden":
             issues.add("extra")
+        elif problem["type"] == "manual_type_required":
+            issues.add("type")
         elif location and location[-1] == "status":
             issues.add("status")
+        elif location and location[-1] == "type":
+            issues.add("type")
         elif location and location[-1] == "analysisId":
             issues.add("analysis_id")
         elif location and location[-1] in ("audioStartMs", "audioEndMs"):
@@ -236,12 +265,13 @@ def _review_validation_message(error: ValidationError) -> str:
             issues.add("format")
     messages = {
         "status": 'Set every detection status to "approved" or "rejected"; "pending" cannot be exported.',
-        "extra": "Remove extra review fields. Each detection accepts only id, status, audioStartMs, and audioEndMs.",
+        "extra": "Remove extra review fields. Each detection accepts only id, type, status, audioStartMs, and audioEndMs.",
         "analysis_id": "Use the analysisId returned by /v1/analyze/audio.",
         "detections": "Provide detections as an array.",
-        "id": "Use detection IDs det_1, det_2, etc., in order without gaps or duplicates.",
+        "id": "Use unique det_N or man_N IDs; automatic det_N IDs must have no gaps or duplicates.",
+        "type": "Use a valid PII type for manual detections and any typed automatic detections.",
         "range": "Use integer audioStartMs and audioEndMs with 0 <= audioStartMs < audioEndMs.",
-        "detection": "Each detection needs id, status, audioStartMs, and audioEndMs.",
+        "detection": "Each detection needs id, status, audioStartMs, and audioEndMs; manual detections also need type.",
         "format": "Review must contain analysisId and detections.",
     }
     return " ".join(message for key, message in messages.items() if key in issues)

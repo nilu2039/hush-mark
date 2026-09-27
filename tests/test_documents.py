@@ -95,6 +95,82 @@ class DocumentTests(unittest.TestCase):
         )
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_manual_document_marks_can_be_reordered_and_overlap_rejected_marks(
+        self,
+    ) -> None:
+        content = BOM_UTF8 + b"AA BB CC DD\r\n"
+        detections = [
+            {"id": "det_2", "type": "EMAIL", "start": 9, "end": 11, "status": "approved"},
+            {"id": "det_1", "type": "PERSON", "start": 3, "end": 8, "status": "rejected"},
+            {"id": "man_1", "type": "PERSON", "start": 3, "end": 5, "status": "approved"},
+        ]
+
+        response = self._redact("notes.md", content, detections)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, BOM_UTF8 + b"AA [PERSON] CC [EMAIL]\r\n")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_pasted_text_redaction_accepts_manual_only_and_edited_marks(self) -> None:
+        text = "AA BB CC DD\r\n"
+        review = {
+            "analysisId": ANALYSIS_ID,
+            "detections": [
+                {"id": "det_2", "type": "PAN", "start": 9, "end": 11, "status": "rejected"},
+                {"id": "man_1", "type": "PERSON", "start": 3, "end": 5, "status": "approved"},
+                {"id": "det_1", "type": "EMAIL", "start": 0, "end": 2, "status": "approved"},
+            ],
+        }
+        response = client.post("/v1/redact", json={"text": text, "review": review})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "[EMAIL] [PERSON] CC DD\r\n")
+        self.assertEqual(response.headers["content-type"], "text/plain; charset=utf-8")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+        manual_only = client.post(
+            "/v1/redact",
+            json={
+                "text": "AA BB",
+                "review": {
+                    "analysisId": ANALYSIS_ID,
+                    "detections": [
+                        {
+                            "id": "man_1", "type": "PERSON", "start": 3,
+                            "end": 5, "status": "approved",
+                        }
+                    ],
+                },
+            },
+        )
+        self.assertEqual(manual_only.status_code, 200)
+        self.assertEqual(manual_only.text, "AA [PERSON]")
+
+    def test_pasted_text_accepts_edited_automatic_type_and_range(self) -> None:
+        text = "Email sample@example.com."
+        analyzed = self._analyze("notes.txt", text.encode("utf-8")).json()
+        detection = analyzed["detections"][0]
+        self.assertEqual((detection["start"], detection["end"]), (6, 24))
+        detection.update(type="PERSON", end=12, status="approved")
+
+        response = client.post(
+            "/v1/redact",
+            json={
+                "text": text,
+                "review": {
+                    "analysisId": analyzed["analysisId"],
+                    "detections": [
+                        {
+                            key: detection[key]
+                            for key in ("id", "type", "start", "end", "status")
+                        }
+                    ],
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "Email [PERSON]@example.com.")
+
     def test_adjacent_spans_and_bom_are_preserved(self) -> None:
         content = BOM_UTF8 + "AB\r\n".encode("utf-8")
         detections = [
@@ -243,6 +319,7 @@ class DocumentTests(unittest.TestCase):
             ([{**valid, "id": "det_2"}], "invalid_review"),
             ([valid, valid], "invalid_review"),
             ([valid, {**valid, "id": "det_2", "start": 1, "end": 3}], "invalid_review"),
+            ([valid, {**valid, "id": "man_1", "start": 1, "end": 3}], "invalid_review"),
             ([{**valid, "end": 99}], "invalid_review"),
         )
         for detections, code in cases:
@@ -275,6 +352,56 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(missing_file.status_code, 422)
         self.assertEqual(missing_file.json()["code"], "invalid_text_file")
 
+    def test_pasted_text_rejects_invalid_reviews_without_echoing_text(self) -> None:
+        valid = {
+            "id": "man_1", "type": "PERSON", "start": 0,
+            "end": 2, "status": "approved",
+        }
+        cases = (
+            ([valid, {**valid, "id": "man_2", "start": 1, "end": 3}], "invalid_review"),
+            ([valid, {**valid, "start": 3, "end": 5}], "invalid_review"),
+            ([{**valid, "end": 99}], "invalid_review"),
+            ([{**valid, "type": "private_marker"}], "invalid_review"),
+            ([{**valid, "status": "pending"}], "invalid_review"),
+        )
+        for detections, code in cases:
+            with self.subTest(code=code, detections=detections):
+                response = client.post(
+                    "/v1/redact",
+                    json={
+                        "text": "private_marker",
+                        "review": {
+                            "analysisId": ANALYSIS_ID,
+                            "detections": detections,
+                        },
+                    },
+                )
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["code"], code)
+                self.assertEqual(set(response.json()), {"code", "message"})
+                self.assertNotIn("private_marker", response.text)
+
+        for payload, code in (
+            ({"text": "private_marker"}, "invalid_review"),
+            (
+                {"text": "  ", "review": {"analysisId": ANALYSIS_ID, "detections": []}},
+                "invalid_text",
+            ),
+            (
+                {
+                    "text": "x" * (MAX_TEXT_LENGTH + 1),
+                    "review": {"analysisId": ANALYSIS_ID, "detections": []},
+                },
+                "text_too_large",
+            ),
+        ):
+            with self.subTest(code=code):
+                response = client.post("/v1/redact", json=payload)
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["code"], code)
+                self.assertEqual(set(response.json()), {"code", "message"})
+                self.assertNotIn("private_marker", response.text)
+
     def test_redaction_validates_file_too(self) -> None:
         for filename, content, status, code in (
             ("notes.docx", b"abc", 415, "unsupported_text_type"),
@@ -293,6 +420,11 @@ class DocumentTests(unittest.TestCase):
         schema = app.openapi()
         self.assertIn("/v1/analyze/document", schema["paths"])
         self.assertIn("/v1/redact/document", schema["paths"])
+        self.assertIn("/v1/redact", schema["paths"])
+        self.assertEqual(
+            set(schema["paths"]["/v1/redact"]["post"]["responses"]["200"]["content"]),
+            {"text/plain"},
+        )
         properties = schema["components"]["schemas"]["AnalyzeDocumentResponseV1"][
             "properties"
         ]
