@@ -245,6 +245,22 @@ class HushMarkTests(unittest.TestCase):
             timestamp_granularities=["word"],
         )
 
+    @patch("hushmark_api.transcription._client")
+    def test_transcriber_expands_zero_duration_word(
+        self, openai_client: MagicMock
+    ) -> None:
+        transcription = openai_client.return_value.audio.transcriptions.create.return_value
+        transcription.text = "Call Jane Doe"
+        transcription.words = [
+            MagicMock(word="Call", start=0.0, end=0.2),
+            MagicMock(word="Jane", start=0.2, end=0.2),
+            MagicMock(word="Doe", start=0.2, end=0.5),
+        ]
+
+        result = transcribe_audio(BytesIO(b"synthetic audio"), "audio.webm", "audio/webm")
+
+        self.assertEqual(result.words[1], TimedWord("Jane", 0.0, 0.5))
+
     @patch("hushmark_api.main.transcribe_audio")
     def test_audio_upload_rejects_invalid_inputs(self, transcriber: MagicMock) -> None:
         missing = client.post("/v1/analyze/audio")

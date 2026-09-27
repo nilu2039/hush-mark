@@ -37,10 +37,18 @@ def transcribe_audio(
         response_format="verbose_json",
         timestamp_granularities=["word"],
     )
-    return TimedTranscript(
-        text=transcription.text,
-        words=tuple(
-            TimedWord(word.word, word.start, word.end)
-            for word in transcription.words or ()
-        ),
-    )
+    words = [
+        TimedWord(word.word, word.start, word.end)
+        for word in transcription.words or ()
+    ]
+    for index, word in enumerate(words):
+        if word.start != word.end or len(words) == 1:
+            continue
+        previous = words[index - 1] if index else None
+        following = words[index + 1] if index + 1 < len(words) else None
+        start = previous.start if previous else word.start
+        end = following.end if following else previous.end
+        if end > start:
+            # Include neighboring speech when the provider gives a word no duration.
+            words[index] = TimedWord(word.text, start, end)
+    return TimedTranscript(text=transcription.text, words=tuple(words))
