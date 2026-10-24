@@ -1,0 +1,16 @@
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$API_DOMAIN} {
+	request_body {
+		max_size 30MB
+	}
+	reverse_proxy api:8000 {
+		transport http {
+			response_header_timeout 180s
+		}
+	}
+}

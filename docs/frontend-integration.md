@@ -209,7 +209,7 @@ const redactedMp3 = await exportResponse.blob();
 
 ## Errors and privacy
 
-Check `response.ok` before reading an export as text or a blob. Error responses are JSON with `{ "code": "...", "message": "..." }`. Typical cases include `422 invalid_review` for pending, malformed, overlapping approved text, or out-of-range marks; `413` for oversized uploads; `415` for unsupported file types; and `503` when analysis or audio processing is unavailable. Display the safe `message`; do not log or report the submitted text, transcript, file contents, or selected snippets.
+Check `response.ok` before reading an export as text or a blob. Error responses are JSON with `{ "code": "...", "message": "..." }`. Typical cases include `422 invalid_review` for pending, malformed, overlapping approved text, or out-of-range marks; `413` for oversized uploads; `415` for unsupported file types; `429 rate_limited` when the deployment's request quota is exceeded; and `503` when analysis or audio processing is unavailable. Display the safe `message`; do not log or report the submitted text, transcript, file contents, or selected snippets. A rate-limit response includes `Retry-After` in seconds. The default Compose quota is 10 API POST requests per client IP per 60-second window; preflights are exempt.
 
 The API does not store review state. Keep review data in memory unless your product deliberately adds its own secure persistence. The export responses use `Cache-Control: no-store`. Revoke browser object URLs after downloads. Audio analysis sends the recording to OpenAI for transcription; text, decoded files, and transcripts are sent to OpenAI for person-name detection.
 

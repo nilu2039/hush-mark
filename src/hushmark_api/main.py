@@ -11,6 +11,7 @@ from openai import OpenAIError
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
 
+from hushmark_api.rate_limit import RateLimitMiddleware
 from hushmark_api.documents import (
     DocumentTextTooLargeError,
     DocumentTooLargeError,
@@ -55,6 +56,9 @@ from hushmark_api.transcription import (
 )
 
 app = FastAPI(title="HushMark API", version="0.1.0")
+rate_limit = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "0"))
+if rate_limit:
+    app.add_middleware(RateLimitMiddleware, max_requests=rate_limit)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -66,7 +70,7 @@ app.add_middleware(
     ],
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "Retry-After"],
 )
 
 

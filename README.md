@@ -19,6 +19,21 @@ For client implementation, see the [frontend integration guide](docs/frontend-in
 
 ## Frontend on Vercel, API on the VPS
 
+For Docker Compose, Caddy HTTPS, and the clone-and-run VPS workflow, follow the
+[production deployment guide](deploy/README.md).
+
+Compose runs a non-root API container with no published API port, runtime-only
+credentials, bounded logs, and a read-only filesystem. Caddy publishes ports 80
+and 443 and retains its certificates in Docker volumes. Compose enables a limit
+of 10 API POST requests per client IP per 60-second window. Preflights and health
+checks do not consume that quota. HTTP 429 responses retain the safe error shape
+and include `Retry-After`.
+
+`RATE_LIMIT_PER_MINUTE` adjusts the limit. It defaults to disabled outside Compose
+for local development; set `0` to disable it explicitly. Counters are bounded,
+live only in process memory, and reset on restart. Keep one API worker with this
+setup. This is not authentication or a global API spending cap.
+
 The browser connects directly to this API for analysis, uploads, and downloads.
 Serve the API over HTTPS at `https://hush-mark-api.nilanjan.xyz`, with its DNS A
 record pointing to `15.235.245.44`. Keep the OpenAI key on this server.

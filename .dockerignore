@@ -1,0 +1,12 @@
+.git
+.venv
+.env*
+**/.env*
+**/__pycache__
+*.pyc
+*.pem
+*.key
+.DS_Store
+build
+dist
+wheels
