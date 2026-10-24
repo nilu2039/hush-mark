@@ -17,6 +17,30 @@ The API is available at `http://127.0.0.1:8000`, with interactive documentation 
 
 For client implementation, see the [frontend integration guide](docs/frontend-integration.md).
 
+## Frontend on Vercel, API on the VPS
+
+The browser connects directly to this API for analysis, uploads, and downloads.
+Serve the API over HTTPS at `https://hush-mark-api.nilanjan.xyz`, with its DNS A
+record pointing to `15.235.245.44`. Keep the OpenAI key on this server.
+
+Configure the allowed frontend origins in the API process environment:
+
+```dotenv
+CORS_ALLOWED_ORIGINS=https://hush-mark.nilanjan.xyz
+```
+
+The value is a comma-separated list of exact origins with no path or trailing
+slash. If unset, it allows `http://localhost:3000` and `http://127.0.0.1:3000`.
+Add local or specific Vercel preview origins explicitly when needed. Restart the
+API after changing this setting. CORS permits browser access; it does not
+authenticate callers or prevent API abuse.
+
+Set the frontend's build-time variable to
+`NEXT_PUBLIC_API_BASE_URL=https://hush-mark-api.nilanjan.xyz/v1`. Large files travel
+directly between the browser and VPS, and exports remain downloadable blobs.
+The current multipart API, 25 MiB audio limit, and temporary-file cleanup remain
+unchanged. Object storage is not required for this architecture.
+
 ## Analyze text
 
 `POST /v1/analyze` accepts non-empty plain text up to 50,000 characters. The MVP currently supports the `en-IN` locale.

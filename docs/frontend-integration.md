@@ -4,6 +4,22 @@ This guide covers the review flow for pasted text, UTF-8 text files, and complet
 
 Base URL for local development: `http://127.0.0.1:8000`. Interactive API documentation is at `/docs`.
 
+In production, use `https://hush-mark-api.nilanjan.xyz` as the API origin. All
+requests, including multipart uploads and file downloads, go directly from the
+browser to the API. In the Next.js frontend, set the build-time public variable
+`NEXT_PUBLIC_API_BASE_URL=https://hush-mark-api.nilanjan.xyz/v1`; it includes the
+version prefix already shown in the endpoint paths below.
+
+Configure the API's `CORS_ALLOWED_ORIGINS` with the exact frontend origins,
+separated by commas. Production uses `https://hush-mark.nilanjan.xyz`. The default
+allowlist contains `http://localhost:3000` and `http://127.0.0.1:3000`. JSON POST
+preflights and multipart requests are supported, and `Content-Disposition` is
+exposed for download filenames. The browser does not receive the OpenAI key.
+
+The `fetch` examples below show API paths. Prefix them with the API origin when
+calling from a different origin. When using `NEXT_PUBLIC_API_BASE_URL`, append
+only the portion after `/v1`, such as `/redact/audio`.
+
 ## Endpoints
 
 | Input | Analyze | Export | Successful export |
@@ -197,4 +213,5 @@ Check `response.ok` before reading an export as text or a blob. Error responses 
 
 The API does not store review state. Keep review data in memory unless your product deliberately adds its own secure persistence. The export responses use `Cache-Control: no-store`. Revoke browser object URLs after downloads. Audio analysis sends the recording to OpenAI for transcription; text, decoded files, and transcripts are sent to OpenAI for person-name detection.
 
-The FastAPI app currently has no CORS middleware. A browser frontend on another origin must use a same-origin API proxy or have the backend configured to allow that specific origin.
+CORS is configured from the API process environment at startup. It controls
+browser access and is not authentication or a rate limit.

@@ -1,9 +1,11 @@
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from openai import OpenAIError
 from pydantic import ValidationError
@@ -53,6 +55,19 @@ from hushmark_api.transcription import (
 )
 
 app = FastAPI(title="HushMark API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.environ.get(
+            "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+        ).split(",")
+        if origin.strip()
+    ],
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+    expose_headers=["Content-Disposition"],
+)
 
 
 @app.exception_handler(RequestValidationError)
